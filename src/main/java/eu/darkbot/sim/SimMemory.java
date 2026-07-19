@@ -101,6 +101,8 @@ public final class SimMemory implements GameAPI.Memory {
 
     @Override
     public long[] queryBytes(byte[] pattern, int maxSize) {
-        return new long[0];
+        long addr = memory.searchPattern(pattern);
+        if (addr == 0 || maxSize <= 0) return new long[0];
+        return new long[]{addr};
     }
 }

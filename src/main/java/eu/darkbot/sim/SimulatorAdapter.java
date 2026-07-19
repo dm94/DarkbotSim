@@ -29,7 +29,6 @@ public final class SimulatorAdapter extends GameAPIImpl<
               new SimWindow(), new SimHandler(),
               new SimMemory(mem), new SimExtraMemory(mem), new SimInteraction(),
               new SimulatorDirectInteraction(world),
-              Capability.BACKGROUND_ONLY,
               Capability.DIRECT_MOVE_SHIP,
               Capability.DIRECT_ENTITY_SELECT,
               Capability.DIRECT_ENTITY_LOCK,
