@@ -18,7 +18,13 @@ public final class SimExtraMemory implements GameAPI.ExtraMemoryReader {
 
     @Override
     public String readString(long address) {
-        return null;
+        if (address < FakeMemory.BASE)
+            return null;
+        // Check vtable matches our STRING_OBJECT_VTABLE
+        long vtable = memory.readLong(address);
+        if (vtable != memory.stringVtable())
+            return null;
+        return memory.readStringByAddress(address);
     }
 
     @Override

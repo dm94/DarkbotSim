@@ -81,6 +81,88 @@ public final class Offsets {
   public static final int SETTINGS_56 = 56; // == 2
   public static final int SETTINGS_60 = 60; // == 1
 
+  // ----- Entity list (Flash Vector at mapAddress + 40) -----------------------
+  /** mapAddress + MAP_ENTITY_LIST -> entityListPtr (Flash Vector object). */
+  public static final int MAP_ENTITY_LIST = 40;
+
+  // ----- Flash Vector layout ------------------------------------------------
+  /** Vector + VECTOR_SIZE -> int element count. */
+  public static final int VECTOR_SIZE = 56;
+  /** Vector + VECTOR_TABLE -> long pointer to element table. */
+  public static final int VECTOR_TABLE = 48;
+  /** Byte skip before first element in the table (AVM2 vtable header). */
+  public static final int VECTOR_TABLE_SKIP = 16;
+  /** Stride between consecutive elements. */
+  public static final int VECTOR_STRIDE = 8;
+  /** AVM2 atom mask: clears the 3-bit type tag. */
+  public static final long ATOM_MASK = ~0b111L;
+
+  // ----- Entity base fields (offsets from entityPtr) -------------------------
+  /** entity + ENTITY_VTABLE -> raw vtable/class-ptr (used for type caching). */
+  public static final int ENTITY_VTABLE = 0x10;
+  /** entity + ENTITY_TRAITS -> long pointer to traits FlashVector. */
+  public static final int ENTITY_TRAITS = 0x30;
+  /** entity + ENTITY_ID -> int entity id. */
+  public static final int ENTITY_ID = 56;
+  /** entity + ENTITY_LOCATION -> long pointer to LocationInfo. */
+  public static final int ENTITY_LOCATION = 64;
+  /** entity + ENTITY_CONTAINER -> long map address (validity check). */
+  public static final int ENTITY_CONTAINER = 96;
+  /** entity + ENTITY_IS_NPC -> int flag: 1=npc, 0=player. */
+  public static final int ENTITY_IS_NPC = 112;
+  /** entity + ENTITY_VISIBLE -> int flag: 0 or 1. */
+  public static final int ENTITY_VISIBLE = 116;
+  /** entity + ENTITY_FLAG_C -> int flag: 0 or 1. */
+  public static final int ENTITY_FLAG_C = 120;
+  /** entity + ENTITY_FLAG_D -> int flag: must be 0 for ships. */
+  public static final int ENTITY_FLAG_D = 124;
+
+  // ----- Ship sub-objects (offsets from entityPtr) ---------------------------
+  /** entity + SHIP_HEALTH -> long pointer to Health. */
+  public static final int SHIP_HEALTH = 184;
+  /** entity + SHIP_INFO -> long pointer to ShipInfo. */
+  public static final int SHIP_INFO = 232;
+  /** entity + SHIP_PLAYER_INFO -> long pointer to PlayerInfo. */
+  public static final int SHIP_PLAYER_INFO = 248;
+  /** entity + SHIP_PET -> long pointer to pet (0 for non-hero). */
+  public static final int SHIP_PET = 176;
+
+  // ----- Npc extra fields ---------------------------------------------------
+  /** entity + NPC_SHIP_PTR -> long -> +80 = npcId int. */
+  public static final int NPC_SHIP_PTR = 192;
+  public static final int NPC_ID_OFFSET = 80;
+
+  // ----- LocationInfo -------------------------------------------------------
+  /** LocationInfo + LOC_X -> double x. */
+  public static final int LOC_X = 32;
+  /** LocationInfo + LOC_Y -> double y. */
+  public static final int LOC_Y = 40;
+
+  // ----- Health (bindable ints, real value at ptr + offset + BINDABLE_VALUE) -
+  public static final int HEALTH_HP = 48;
+  public static final int HEALTH_MAX_HP = 56;
+  public static final int HEALTH_SHIELD = 80;
+  public static final int HEALTH_MAX_SHIELD = 88;
+  /** Bindable value skip: the real int is at ptr + fieldOffset + BINDABLE_VALUE. */
+  public static final int BINDABLE_VALUE = 40;
+
+  // ----- ShipInfo -----------------------------------------------------------
+  public static final int SHIP_INFO_SPEED = 80;
+
+  // ----- Box ----------------------------------------------------------------
+  /** entity + BOX_HASH -> pointer to hash string (unused in v1). */
+  public static final int BOX_HASH = 160;
+
+  // ----- AVM2 String object layout ------------------------------------------
+  /** String + 0x10 -> pointer to raw char data. */
+  public static final int STRING_DATA_PTR = 0x10;
+  /** String + 0x20 -> sizeAndFlags (lower32=length, upper32=flags). */
+  public static final int STRING_SIZE_FLAGS = 0x20;
+
+  // ----- AVM2 Atom type tags ------------------------------------------------
+  public static final long ATOM_OBJECT = 0b001;
+  public static final long ATOM_STRING = 0b010;
+
   // ----- Defaults -----------------------------------------------------------
   public static final int DEFAULT_MAP_WIDTH = 21000;
   public static final int DEFAULT_MAP_HEIGHT = 13500;

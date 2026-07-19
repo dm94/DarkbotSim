@@ -3,7 +3,9 @@ package eu.darkbot.sim;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.LongPredicate;
 
 import com.github.manolo8.darkbot.core.BotInstaller;
@@ -39,6 +41,26 @@ public final class FakeMemory {
   private final long heroClosureAddress;
   private final long vtableString;
 
+  // Entity list (Flash Vector) — allocated once, resized each tick.
+  private long entityListAddress;
+  private long entityListTableAddress;
+  private int entityListTableCapacity;
+
+  // Distinct vtable pointers per entity kind (EntityRegistry caches by this).
+  private final long vtableShip;
+  private final long vtableNpc;
+  private final long vtableBox;
+
+  // Shared traits vector used by all entities (first trait for asset ID chain).
+  private final long sharedTraitVectorAddress;
+
+  // String storage: maps string object address -> Java string.
+  private final Map<Long, String> stringStore = new HashMap<>();
+  // Track per-entity addresses so we can reuse across ticks.
+  private final Map<Integer, Long> entityAddresses = new HashMap<>();
+  // Track per-entity sub-object addresses: key = entityId * 10 + slot.
+  private final Map<Long, Long> subObjectAddresses = new HashMap<>();
+
   public FakeMemory(SimWorld world) {
     this.world = world;
     this.buf = ByteBuffer.allocate(SIZE).order(ByteOrder.LITTLE_ENDIAN);
@@ -57,6 +79,21 @@ public final class FakeMemory {
     this.settingsAddress = alloc(256);
     this.heroClosureAddress = alloc(1024);
     this.vtableString = alloc(8);
+
+    // Entity vtable stubs — non-zero, distinct per kind.
+    this.vtableShip = alloc(8);
+    this.vtableNpc = alloc(8);
+    this.vtableBox = alloc(8);
+
+    // Shared traits vector for asset ID chain (a small Flash Vector).
+    this.sharedTraitVectorAddress = alloc(64);
+
+    // Entity list — initial capacity for 64 entities.
+    this.entityListAddress = alloc(64);
+    this.entityListTableAddress = alloc(64 * Offsets.VECTOR_STRIDE + Offsets.VECTOR_TABLE_SKIP);
+    this.entityListTableCapacity = 64;
+    writeInt(entityListAddress + Offsets.VECTOR_SIZE, 0);
+    writeLong(entityListAddress + Offsets.VECTOR_TABLE, entityListTableAddress);
 
     seedStaticLayout();
 
@@ -161,6 +198,199 @@ public final class FakeMemory {
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_LEVEL, clamp(world.hero.level, 0, 100));
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_CARGO, Math.max(0, world.hero.cargo));
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_MAX_CARGO, clamp(world.hero.maxCargo, 100, 99_999));
+
+    // --- Entity list ---
+    int totalEntities = world.npcs.size() + world.boxes.size();
+    ensureEntityListCapacity(totalEntities);
+
+    stringStore.clear();
+
+    int idx = 0;
+    for (SimWorld.SimNpc npc : world.npcs) {
+      long entityAddr = getOrCreateEntityAddress(npc.id);
+      writeNpcEntity(entityAddr, npc);
+      long atomPtr = entityAddr | Offsets.ATOM_OBJECT;
+      writeLong(entityListTableAddress + Offsets.VECTOR_TABLE_SKIP + (long) idx * Offsets.VECTOR_STRIDE, atomPtr);
+      idx++;
+    }
+    for (SimWorld.SimBox box : world.boxes) {
+      long entityAddr = getOrCreateEntityAddress(box.id);
+      writeBoxEntity(entityAddr, box);
+      long atomPtr = entityAddr | Offsets.ATOM_OBJECT;
+      writeLong(entityListTableAddress + Offsets.VECTOR_TABLE_SKIP + (long) idx * Offsets.VECTOR_STRIDE, atomPtr);
+      idx++;
+    }
+    writeInt(entityListAddress + Offsets.VECTOR_SIZE, totalEntities);
+  }
+
+  private void writeNpcEntity(long addr, SimWorld.SimNpc npc) {
+    // Entity base
+    writeLong(addr + Offsets.ENTITY_VTABLE, vtableNpc);
+    writeInt(addr + Offsets.ENTITY_ID, npc.id);
+    writeLong(addr + Offsets.ENTITY_CONTAINER, mapAddress);
+
+    // Ship detection flags: id>0, isNpc=1, visible=1, c=1, d=0
+    writeInt(addr + Offsets.ENTITY_IS_NPC, 1);
+    writeInt(addr + Offsets.ENTITY_VISIBLE, 1);
+    writeInt(addr + Offsets.ENTITY_FLAG_C, 1);
+    writeInt(addr + Offsets.ENTITY_FLAG_D, 0);
+
+    // LocationInfo
+    long loc = allocOrReuse(npc.id, 0, 64);
+    writeLong(addr + Offsets.ENTITY_LOCATION, loc);
+    writeDouble(loc + Offsets.LOC_X, npc.x);
+    writeDouble(loc + Offsets.LOC_Y, npc.y);
+
+    // Asset ID chain for NPC: entity -> traits -> trait -> ... -> string "npc-streuner"
+    buildAssetIdChain(addr, "npc-" + npc.name.toLowerCase());
+
+    // Health sub-object
+    long health = allocOrReuse(npc.id, 1, 128);
+    writeLong(addr + Offsets.SHIP_HEALTH, health);
+    writeBindableInt(health + Offsets.HEALTH_HP, (int) npc.hp);
+    writeBindableInt(health + Offsets.HEALTH_MAX_HP, (int) npc.maxHp);
+    writeBindableInt(health + Offsets.HEALTH_SHIELD, 0);
+    writeBindableInt(health + Offsets.HEALTH_MAX_SHIELD, 0);
+
+    // ShipInfo (minimal)
+    long shipInfo = allocOrReuse(npc.id, 2, 128);
+    writeLong(addr + Offsets.SHIP_INFO, shipInfo);
+    writeBindableInt(shipInfo + Offsets.SHIP_INFO_SPEED, (int) npc.speed);
+
+    // Npc ID via ship pointer
+    long npcShipPtr = allocOrReuse(npc.id, 3, 128);
+    writeLong(addr + Offsets.NPC_SHIP_PTR, npcShipPtr);
+    writeInt(npcShipPtr + Offsets.NPC_ID_OFFSET, npc.id);
+
+    // No pet
+    writeLong(addr + Offsets.SHIP_PET, 0);
+  }
+
+  private void writeBoxEntity(long addr, SimWorld.SimBox box) {
+    // Entity base
+    writeLong(addr + Offsets.ENTITY_VTABLE, vtableBox);
+    writeInt(addr + Offsets.ENTITY_ID, box.id);
+    writeLong(addr + Offsets.ENTITY_CONTAINER, mapAddress);
+
+    // Ship detection flags: id>0, isNpc=anything, visible=1
+    // Boxes have isNpc that fails isShip check (could be any value not 0/1)
+    writeInt(addr + Offsets.ENTITY_IS_NPC, 99);
+    writeInt(addr + Offsets.ENTITY_VISIBLE, 1);
+    writeInt(addr + Offsets.ENTITY_FLAG_C, 0);
+    writeInt(addr + Offsets.ENTITY_FLAG_D, 0);
+
+    // LocationInfo
+    long loc = allocOrReuse(box.id, 0, 64);
+    writeLong(addr + Offsets.ENTITY_LOCATION, loc);
+    writeDouble(loc + Offsets.LOC_X, box.x);
+    writeDouble(loc + Offsets.LOC_Y, box.y);
+
+    // Asset ID chain: entity -> traits -> ... -> string "box-prometium"
+    buildAssetIdChain(addr, "box-" + box.type.toLowerCase());
+
+    // Box doesn't need Health/ShipInfo/Pet
+    writeLong(addr + Offsets.SHIP_HEALTH, 0);
+    writeLong(addr + Offsets.SHIP_INFO, 0);
+    writeLong(addr + Offsets.SHIP_PLAYER_INFO, 0);
+    writeLong(addr + Offsets.SHIP_PET, 0);
+    writeLong(addr + Offsets.NPC_SHIP_PTR, 0);
+  }
+
+  /**
+   * Build the AVM2 asset-ID chain so {@code Offsets.getEntityAssetId()} resolves.
+   * <pre>
+   * entity +0x30 -> traitVector (FlashVector, first element = trait atom)
+   * trait  +0x40 -> intermediate1
+   * intermediate1 +0x20 -> intermediate2
+   * intermediate2 +0x18 -> stringObject
+   * </pre>
+   */
+  private void buildAssetIdChain(long entityAddr, String assetId) {
+    // Write the shared trait vector at entity +0x30
+    writeLong(entityAddr + Offsets.ENTITY_TRAITS, sharedTraitVectorAddress);
+
+    // The first trait element in the vector (at table + TABLE_SKIP + 0)
+    long traitAtom = alloc(64) | Offsets.ATOM_OBJECT;
+    writeLong(sharedTraitVectorAddress + Offsets.VECTOR_SIZE, 1);
+    writeLong(entityListTableAddress, traitAtom); // reuse temp; trait vector has its own table
+    // Actually, write the trait vector's own table
+    long traitTable = alloc(32);
+    writeLong(sharedTraitVectorAddress + Offsets.VECTOR_TABLE, traitTable);
+    writeLong(sharedTraitVectorAddress + Offsets.VECTOR_SIZE, 1);
+    writeLong(traitTable + Offsets.VECTOR_TABLE_SKIP, traitAtom);
+
+    long trait = traitAtom & Offsets.ATOM_MASK;
+
+    // trait +0x40 -> intermediate1
+    long inter1 = alloc(64);
+    writeLong(trait + 0x40, inter1);
+
+    // inter1 +0x20 -> intermediate2
+    long inter2 = alloc(64);
+    writeLong(inter1 + 0x20, inter2);
+
+    // inter2 +0x18 -> stringObject (the asset ID string)
+    long strObj = allocateStringObject(assetId);
+    writeLong(inter2 + 0x18, strObj);
+  }
+
+  /**
+   * Allocate an AVM2-compatible StringObject in memory.
+   * Layout: +0x00=vtable, +0x10=charDataPtr, +0x20=sizeAndFlags.
+   */
+  private long allocateStringObject(String s) {
+    byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    long strObj = alloc(64);
+    long charData = alloc(bytes.length + 8);
+    writeBytes(charData, bytes);
+
+    writeLong(strObj, vtableString); // vtable must match STRING_OBJECT_VTABLE
+    writeLong(strObj + Offsets.STRING_DATA_PTR, charData);
+    // sizeAndFlags: lower32 = length, upper32 = 0 (8-bit static)
+    writeLong(strObj + Offsets.STRING_SIZE_FLAGS, (long) bytes.length);
+
+    stringStore.put(strObj, s);
+    return strObj;
+  }
+
+  /** Write a bindable int: the real value lives at {@code ptr + BINDABLE_VALUE}. */
+  private void writeBindableInt(long ptr, int value) {
+    writeInt(ptr + Offsets.BINDABLE_VALUE, value);
+  }
+
+  // ----- Entity address management ------------------------------------------
+
+  private long getOrCreateEntityAddress(int entityId) {
+    return entityAddresses.computeIfAbsent(entityId, id -> alloc(512));
+  }
+
+  /**
+   * Allocate or reuse a per-entity sub-object. Slot indices: 0=location,
+   * 1=health, 2=shipInfo, 3=npcShipPtr.
+   */
+  private long allocOrReuse(int entityId, int slot, int size) {
+    long key = (long) entityId * 10 + slot;
+    return subObjectAddresses.computeIfAbsent(key, k -> alloc(size));
+  }
+
+  private void ensureEntityListCapacity(int count) {
+    if (count <= entityListTableCapacity)
+      return;
+    int newCap = Math.max(count, entityListTableCapacity * 2);
+    long newTable = alloc(newCap * Offsets.VECTOR_STRIDE + Offsets.VECTOR_TABLE_SKIP);
+    writeLong(entityListAddress + Offsets.VECTOR_TABLE, newTable);
+    entityListTableAddress = newTable;
+    entityListTableCapacity = newCap;
+  }
+
+  // ----- String store -------------------------------------------------------
+
+  /**
+   * Look up a string previously written via {@link #allocateStringObject}.
+   * Returns {@code null} if the address is unknown.
+   */
+  public String readStringByAddress(long address) {
+    return stringStore.get(address);
   }
 
   // ----- Candidates for searchClassClosure ----------------------------------
@@ -319,5 +549,15 @@ public final class FakeMemory {
 
   public long heroClosureAddress() {
     return heroClosureAddress;
+  }
+
+  /** Returns the vtable address used for AVM2 String objects. */
+  public long stringVtable() {
+    return vtableString;
+  }
+
+  /** Returns the entity list (Flash Vector) root address. */
+  public long entityListAddress() {
+    return entityListAddress;
   }
 }
