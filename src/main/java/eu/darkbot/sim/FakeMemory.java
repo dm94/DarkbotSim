@@ -2,6 +2,7 @@ package eu.darkbot.sim;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -12,12 +13,32 @@ import com.github.manolo8.darkbot.core.BotInstaller;
 
 /**
  * In-JVM fake of the Flash process memory. Implements the byte layout that
- * {@link BotInstaller} searches for and serves the offsets the managers read.
+ * {@link BotInstaller} expects and serves the offsets the managers read.
  *
  * <p>
  * Backed by a single little-endian {@link ByteBuffer} addressed by absolute
  * {@code long} addresses. Each {@link #tick()} mirrors the {@link SimWorld}
  * state into the layout.
+ *
+ * <h3>Bugs fixed in this version:</h3>
+ * <ul>
+ *   <li><b>Entity list linked to map:</b> {@code mapAddress + MAP_ENTITY_LIST}
+ *       now points to the entity vector so {@code EntityList.update(address)}
+ *       can discover entities.</li>
+ *   <li><b>Hero sub-objects:</b> LocationInfo, Health, ShipInfo, traits, and
+ *       entity flags are set up for the hero ship so DarkBot's managers
+ *       can read position, hp, shield, speed.</li>
+ *   <li><b>View bounds:</b> 2D view container chain initialized so
+ *       {@code MapManager.updateBounds()} doesn't NPE on
+ *       {@code readObjectName}.</li>
+ *   <li><b>String object chain:</b> Matches the indirection that
+ *       {@code Offsets.getTraitAssetId()} expects
+ *       ({@code strObj +0x8 → A → A+0x10 → B → B+0x18 → rawStr}).</li>
+ *   <li><b>Per-entity trait vectors:</b> Each entity gets its own traits
+ *       vector so box type detection works correctly per-entity.</li>
+ *   <li><b>Hero position sync:</b> {@code tick()} now writes hero position,
+ *       health, and speed into memory so DarkBot sees movement.</li>
+ * </ul>
  */
 public final class FakeMemory {
 
@@ -51,10 +72,13 @@ public final class FakeMemory {
   private final long vtableNpc;
   private final long vtableBox;
 
-  // Shared traits vector used by all entities (first trait for asset ID chain).
-  private final long sharedTraitVectorAddress;
+  // Hero ship sub-object addresses (updated every tick).
+  private final long heroShipAddress;
+  private final long heroLocationAddress;
+  private final long heroHealthAddress;
+  private final long heroShipInfoAddress;
 
-  // String storage: maps string object address -> Java string.
+  // String storage: maps raw string object address -> Java string.
   private final Map<Long, String> stringStore = new HashMap<>();
   // Track per-entity addresses so we can reuse across ticks.
   private final Map<Integer, Long> entityAddresses = new HashMap<>();
@@ -72,21 +96,18 @@ public final class FakeMemory {
     if (mainAppAddress < BASE)
       throw new IllegalStateException("mainApp below BASE");
     this.mainAddress = alloc(2048);
-    this.screenAddress = alloc(1024);
+    this.screenAddress = alloc(2048); // larger: needs room for view bounds chain
     this.guiAddress = alloc(512);
     this.connMgrAddress = alloc(512);
     this.mapAddress = alloc(1024);
-    this.settingsAddress = alloc(256);
+    this.settingsAddress = alloc(512); // larger: settings manager reads more fields
     this.heroClosureAddress = alloc(1024);
-    this.vtableString = alloc(8);
+    this.vtableString = alloc(64); // larger: needs composite at +8
 
     // Entity vtable stubs — non-zero, distinct per kind.
-    this.vtableShip = alloc(8);
-    this.vtableNpc = alloc(8);
-    this.vtableBox = alloc(8);
-
-    // Shared traits vector for asset ID chain (a small Flash Vector).
-    this.sharedTraitVectorAddress = alloc(64);
+    this.vtableShip = alloc(64);
+    this.vtableNpc = alloc(64);
+    this.vtableBox = alloc(64);
 
     // Entity list — initial capacity for 64 entities.
     this.entityListAddress = alloc(64);
@@ -94,6 +115,15 @@ public final class FakeMemory {
     this.entityListTableCapacity = 64;
     writeInt(entityListAddress + Offsets.VECTOR_SIZE, 0);
     writeLong(entityListAddress + Offsets.VECTOR_TABLE, entityListTableAddress);
+
+    // Pre-allocate hero sub-objects (stable addresses).
+    this.heroLocationAddress = alloc(128);
+    this.heroHealthAddress = alloc(256);
+    this.heroShipInfoAddress = alloc(256);
+
+    // Hero ship object (256 bytes for all entity + ship fields).
+    this.heroShipAddress = alloc(512);
+    writeLong(screenAddress + Offsets.SCREEN_HERO, heroShipAddress);
 
     seedStaticLayout();
 
@@ -116,37 +146,105 @@ public final class FakeMemory {
     // screenManager + 0 -> SCRIPT_OBJECT_VTABLE (any non-zero)
     writeLong(screenAddress, alloc(8));
 
-    // STRING_OBJECT_VTABLE chain: screen -> +0x10 -> +0x28 -> +0x8 -> +0x3e8 ->
-    // +0x0
+    // STRING_OBJECT_VTABLE chain: screen -> +0x10 -> +0x28 -> +0x8 -> +0x3e8 -> +0x0
     long s = chain(screenAddress, 0x10, 0x28, 0x8, 0x3e8);
     writeLong(s, vtableString);
 
-    // screen -> +240 -> hero ship; hero ship + 56 = heroId
-    long heroShip = alloc(256);
-    writeLong(screenAddress + Offsets.SCREEN_HERO, heroShip);
-    writeInt(heroShip + Offsets.HERO_ID, world.hero.id);
-    writeLong(heroShip + Offsets.HERO_PET, 0); // no pet in v1
+    // -----------------------------------------------------------------------
+    // Hero ship — full entity + ship layout so DarkBot managers can read it.
+    // -----------------------------------------------------------------------
+    long h = heroShipAddress;
 
-    writeLong(screenAddress + Offsets.SCREEN_EVENT, alloc(64));
-    writeLong(screenAddress + Offsets.SCREEN_VIEW, alloc(512));
-    writeLong(screenAddress + Offsets.SCREEN_MINIMAP, alloc(64));
+    // Entity base fields
+    writeLong(h + Offsets.ENTITY_VTABLE, vtableShip);
+    writeInt(h + Offsets.ENTITY_ID, world.hero.id);
+    writeLong(h + Offsets.ENTITY_CONTAINER, mapAddress); // needed for isInvalid() check
+    writeInt(h + Offsets.ENTITY_IS_NPC, 0);              // hero is NOT an NPC
+    writeInt(h + Offsets.ENTITY_VISIBLE, 1);
+    writeInt(h + Offsets.ENTITY_FLAG_C, 1);
+    writeInt(h + Offsets.ENTITY_FLAG_D, 0);
+
+    // Traits — empty vector (hero doesn't need asset ID detection)
+    long heroTraitsVec = alloc(64);
+    writeLong(h + Offsets.ENTITY_TRAITS, heroTraitsVec);
+    writeLong(heroTraitsVec + Offsets.VECTOR_SIZE, 0);
+    writeLong(heroTraitsVec + Offsets.VECTOR_TABLE, alloc(16));
+
+    // LocationInfo
+    writeLong(h + Offsets.ENTITY_LOCATION, heroLocationAddress);
+    writeDouble(heroLocationAddress + Offsets.LOC_X, world.hero.x);
+    writeDouble(heroLocationAddress + Offsets.LOC_Y, world.hero.y);
+
+    // Health
+    writeLong(h + Offsets.SHIP_HEALTH, heroHealthAddress);
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_HP, (int) world.hero.hp);
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_MAX_HP, (int) world.hero.maxHp);
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_SHIELD, (int) world.hero.shield);
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_MAX_SHIELD, (int) world.hero.maxShield);
+
+    // ShipInfo
+    writeLong(h + Offsets.SHIP_INFO, heroShipInfoAddress);
+    writeBindableInt(heroShipInfoAddress + Offsets.SHIP_INFO_SPEED, (int) world.hero.speed);
+
+    // PlayerInfo (minimal)
+    writeLong(h + Offsets.SHIP_PLAYER_INFO, alloc(128));
+
+    // Pet
+    writeLong(h + Offsets.SHIP_PET, 0);
+
+    // -----------------------------------------------------------------------
+    // screenManager sub-addresses
+    // -----------------------------------------------------------------------
+    writeLong(screenAddress + Offsets.SCREEN_EVENT, alloc(256));
+    writeLong(screenAddress + Offsets.SCREEN_VIEW, alloc(1024));
+    writeLong(screenAddress + Offsets.SCREEN_MINIMAP, alloc(256));
     writeLong(screenAddress + Offsets.SCREEN_MAP, mapAddress);
 
-    // map object
+    // -----------------------------------------------------------------------
+    // View bounds — 2D mode chain for MapManager.updateBounds()
+    //
+    // MapManager reads:
+    //   viewAddressStatic = screenManager + 216
+    //   viewAddress = readLong(viewAddressStatic)
+    //   is3DView = !is2DForced() && readObjectName(readLong(viewAddr + 208)).contains("HUD")
+    //   boundsAddress = readLong(viewAddress + 208)  // 2D path
+    //   clientWidth = readInt(boundsAddress + 0xA8)
+    //   clientHeight = readInt(boundsAddress + 0xAC)
+    //   updated = readLong(readLong(boundsAddress + 280) + 112)
+    //   boundX/Y/MaxX/MaxY = readDouble(updated + 80/88/112/120)
+    //
+    // readObjectName(obj) = readString(obj, 0x10, 0x28, 0x90)
+    //   chain: obj+0x10 → A, A+0x28 → B, B+0x90 → stringObject
+    //   then readString(stringObject) goes through SimExtraMemory
+    // -----------------------------------------------------------------------
+    setupViewBounds();
+
+    // -----------------------------------------------------------------------
+    // Map object
+    // -----------------------------------------------------------------------
     writeInt(mapAddress + Offsets.MAP_WIDTH, world.mapWidth);
     writeInt(mapAddress + Offsets.MAP_HEIGHT, world.mapHeight);
     writeInt(mapAddress + Offsets.MAP_ID, world.mapId);
+
+    // *** CRITICAL FIX: link entity list to map ***
+    // EntityList.update(address) reads API.readLong(address + 40) for the vector.
+    writeLong(mapAddress + Offsets.MAP_ENTITY_LIST, entityListAddress);
+
     long targetWrapper = alloc(64);
     writeLong(mapAddress + Offsets.MAP_TARGET_WRAPPER, targetWrapper);
     writeLong(targetWrapper + Offsets.TARGET_ENTITY, 0);
 
-    // settings closure
+    // -----------------------------------------------------------------------
+    // Settings closure (must match BotInstaller.settingsPattern)
+    // -----------------------------------------------------------------------
     writeInt(settingsAddress + Offsets.SETTINGS_48, -1);
     writeInt(settingsAddress + Offsets.SETTINGS_52, 0);
     writeInt(settingsAddress + Offsets.SETTINGS_56, 2);
     writeInt(settingsAddress + Offsets.SETTINGS_60, 1);
 
-    // hero closure
+    // -----------------------------------------------------------------------
+    // Hero closure (must match BotInstaller.checkUserData predicate)
+    // -----------------------------------------------------------------------
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_HERO_ID, world.hero.id);
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_LEVEL, clamp(world.hero.level, 0, 100));
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_BOOL, 1);
@@ -155,16 +253,90 @@ public final class FakeMemory {
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_MAX_CARGO, clamp(world.hero.maxCargo, 100, 99_999));
   }
 
+  /**
+   * Set up the 2D view bounds chain so MapManager.updateBounds() works.
+   *
+   * <pre>
+   * viewObj (screen + 216)
+   *   +208 → view2dContainer
+   *          +0x10 → nameChainA
+   *                   +0x28 → nameChainB
+   *                            +0x90 → rawString "2D"  (readObjectName)
+   *          +0xA8 = clientWidth
+   *          +0xAC = clientHeight
+   *          +280 → viewCamera
+   *                   +112 → viewBoundsData
+   *                            +80  = boundX  (0.0)
+   *                            +88  = boundY  (0.0)
+   *                            +96  = rightTop.x (mapWidth)
+   *                            +104 = rightTop.y (0.0)
+   *                            +112 = boundMaxX (mapWidth)
+   *                            +120 = boundMaxY (mapHeight)
+   *                            +128 = leftBot.x (0.0)
+   *                            +136 = leftBot.y (mapHeight)
+   * </pre>
+   */
+  private void setupViewBounds() {
+    long viewObj = readLong(screenAddress + Offsets.SCREEN_VIEW);
+    if (viewObj == 0) return;
+
+    // 2D view container
+    long view2d = alloc(512);
+    writeLong(viewObj + 208, view2d);
+
+    // --- readObjectName(view2d) chain: view2d → A → B → rawStrObj ---
+    // readString(view2d, 0x10, 0x28, 0x90)
+    long nameChainA = alloc(128);
+    writeLong(view2d + 0x10, nameChainA);
+
+    long nameChainB = alloc(128);
+    writeLong(nameChainA + 0x28, nameChainB);
+
+    long nameRawStr = allocateRawString("2D");
+    writeLong(nameChainB + 0x90, nameRawStr);
+
+    // --- View2d container fields for bounds ---
+    writeInt(view2d + 0xA8, 1920);  // clientWidth
+    writeInt(view2d + 0xAC, 1080);  // clientHeight
+
+    // viewCamera at view2d + 280
+    long viewCamera = alloc(256);
+    writeLong(view2d + 280, viewCamera);
+
+    // viewBoundsData at viewCamera + 112
+    long boundsData = alloc(256);
+    writeLong(viewCamera + 112, boundsData);
+
+    // Corner coordinates for the polygon (2D view bounds)
+    writeDouble(boundsData + 80,  0.0);                    // leftTop.x
+    writeDouble(boundsData + 88,  0.0);                    // leftTop.y
+    writeDouble(boundsData + 96,  (double) world.mapWidth); // rightTop.x
+    writeDouble(boundsData + 104, 0.0);                    // rightTop.y
+    writeDouble(boundsData + 112, (double) world.mapWidth); // rightBot.x (= boundMaxX)
+    writeDouble(boundsData + 120, (double) world.mapHeight);// rightBot.y (= boundMaxY)
+    writeDouble(boundsData + 128, 0.0);                    // leftBot.x
+    writeDouble(boundsData + 136, (double) world.mapHeight);// leftBot.y
+  }
+
   private static int clamp(int v, int lo, int hi) {
     return Math.max(lo, Math.min(hi, v));
   }
 
-  /** Allocate {@code bytes} and return its address. */
+  /**
+   * Allocate {@code bytes} and return its address, 8-byte aligned.
+   *
+   * <p>AVM2 objects are always stored at addresses where the low 3 bits are
+   * zero — those bits are used as atom type tags (e.g. {@code ATOM_OBJECT}).
+   * When DarkBot strips the tag via {@code ptr & ATOM_MASK}, it must recover
+   * the original pointer exactly. Non-aligned addresses would corrupt every
+   * read after an atom-mask round-trip.
+   */
   private long alloc(int bytes) {
-    long addr = nextAddr;
-    nextAddr += bytes;
-    if (nextAddr - BASE > SIZE)
+    long addr = (nextAddr + 7) & ~7L;
+    long end = addr + bytes;
+    if (end - BASE > SIZE)
       throw new OutOfMemoryError("FakeMemory exhausted");
+    nextAddr = end;
     return addr;
   }
 
@@ -186,14 +358,29 @@ public final class FakeMemory {
 
   /** Repopulate the dynamic fields from {@link SimWorld}. */
   public void tick() {
+    // --- Map ---
     writeInt(mapAddress + Offsets.MAP_ID, world.mapId);
     writeInt(mapAddress + Offsets.MAP_WIDTH, world.mapWidth);
     writeInt(mapAddress + Offsets.MAP_HEIGHT, world.mapHeight);
 
-    long heroShip = readLong(screenAddress + Offsets.SCREEN_HERO);
-    if (heroShip != 0)
-      writeInt(heroShip + Offsets.HERO_ID, world.hero.id);
+    // --- Hero ship identity ---
+    writeInt(heroShipAddress + Offsets.ENTITY_ID, world.hero.id);
+    writeLong(heroShipAddress + Offsets.ENTITY_CONTAINER, mapAddress);
 
+    // --- Hero position (LocationInfo) ---
+    writeDouble(heroLocationAddress + Offsets.LOC_X, world.hero.x);
+    writeDouble(heroLocationAddress + Offsets.LOC_Y, world.hero.y);
+
+    // --- Hero health ---
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_HP, (int) world.hero.hp);
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_MAX_HP, (int) world.hero.maxHp);
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_SHIELD, (int) world.hero.shield);
+    writeBindableInt(heroHealthAddress + Offsets.HEALTH_MAX_SHIELD, (int) world.hero.maxShield);
+
+    // --- Hero speed ---
+    writeBindableInt(heroShipInfoAddress + Offsets.SHIP_INFO_SPEED, (int) world.hero.speed);
+
+    // --- Hero closure ---
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_HERO_ID, world.hero.id);
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_LEVEL, clamp(world.hero.level, 0, 100));
     writeInt(heroClosureAddress + Offsets.HERO_CLOSURE_CARGO, Math.max(0, world.hero.cargo));
@@ -236,16 +423,16 @@ public final class FakeMemory {
     writeInt(addr + Offsets.ENTITY_FLAG_D, 0);
 
     // LocationInfo
-    long loc = allocOrReuse(npc.id, 0, 64);
+    long loc = allocOrReuse(npc.id, 0, 128);
     writeLong(addr + Offsets.ENTITY_LOCATION, loc);
     writeDouble(loc + Offsets.LOC_X, npc.x);
     writeDouble(loc + Offsets.LOC_Y, npc.y);
 
-    // Asset ID chain for NPC: entity -> traits -> trait -> ... -> string "npc-streuner"
+    // Per-entity asset ID chain: entity -> traits -> trait -> ... -> string "npc-streuner"
     buildAssetIdChain(addr, "npc-" + npc.name.toLowerCase());
 
     // Health sub-object
-    long health = allocOrReuse(npc.id, 1, 128);
+    long health = allocOrReuse(npc.id, 1, 256);
     writeLong(addr + Offsets.SHIP_HEALTH, health);
     writeBindableInt(health + Offsets.HEALTH_HP, (int) npc.hp);
     writeBindableInt(health + Offsets.HEALTH_MAX_HP, (int) npc.maxHp);
@@ -253,7 +440,7 @@ public final class FakeMemory {
     writeBindableInt(health + Offsets.HEALTH_MAX_SHIELD, 0);
 
     // ShipInfo (minimal)
-    long shipInfo = allocOrReuse(npc.id, 2, 128);
+    long shipInfo = allocOrReuse(npc.id, 2, 256);
     writeLong(addr + Offsets.SHIP_INFO, shipInfo);
     writeBindableInt(shipInfo + Offsets.SHIP_INFO_SPEED, (int) npc.speed);
 
@@ -264,6 +451,9 @@ public final class FakeMemory {
 
     // No pet
     writeLong(addr + Offsets.SHIP_PET, 0);
+
+    // PlayerInfo
+    writeLong(addr + Offsets.SHIP_PLAYER_INFO, 0);
   }
 
   private void writeBoxEntity(long addr, SimWorld.SimBox box) {
@@ -272,20 +462,19 @@ public final class FakeMemory {
     writeInt(addr + Offsets.ENTITY_ID, box.id);
     writeLong(addr + Offsets.ENTITY_CONTAINER, mapAddress);
 
-    // Ship detection flags: id>0, isNpc=anything, visible=1
-    // Boxes have isNpc that fails isShip check (could be any value not 0/1)
+    // Ship detection: isNpc=99 ensures isShip() check fails → classified as box
     writeInt(addr + Offsets.ENTITY_IS_NPC, 99);
     writeInt(addr + Offsets.ENTITY_VISIBLE, 1);
     writeInt(addr + Offsets.ENTITY_FLAG_C, 0);
     writeInt(addr + Offsets.ENTITY_FLAG_D, 0);
 
     // LocationInfo
-    long loc = allocOrReuse(box.id, 0, 64);
+    long loc = allocOrReuse(box.id, 0, 128);
     writeLong(addr + Offsets.ENTITY_LOCATION, loc);
     writeDouble(loc + Offsets.LOC_X, box.x);
     writeDouble(loc + Offsets.LOC_Y, box.y);
 
-    // Asset ID chain: entity -> traits -> ... -> string "box-prometium"
+    // Per-entity asset ID chain: entity -> traits -> ... -> string "box-prometium"
     buildAssetIdChain(addr, "box-" + box.type.toLowerCase());
 
     // Box doesn't need Health/ShipInfo/Pet
@@ -298,59 +487,113 @@ public final class FakeMemory {
 
   /**
    * Build the AVM2 asset-ID chain so {@code Offsets.getEntityAssetId()} resolves.
+   *
+   * <p>Each entity gets its OWN trait vector (not shared) so that per-entity
+   * type detection works correctly (e.g. differentiating "box-prometium" from
+   * "box-endurium").
+   *
    * <pre>
-   * entity +0x30 -> traitVector (FlashVector, first element = trait atom)
-   * trait  +0x40 -> intermediate1
-   * intermediate1 +0x20 -> intermediate2
-   * intermediate2 +0x18 -> stringObject
+   * getEntityAssetId(entity):
+   *   readLong(entity + 0x30)           → traitVector
+   *   readLong(traitVector + 0x30)      → traitTable  (VECTOR_TABLE)
+   *   readLong(traitTable + 0x10)       → traitAtom   (VECTOR_TABLE_SKIP)
+   *   traitAtom &amp; ATOM_MASK            → trait
+   *
+   * getTraitAssetId(trait):
+   *   readLong(trait + 0x40)            → inter1
+   *   readLong(inter1 + 0x20)           → inter2
+   *   readLong(inter2 + 0x18)           → wrapperStr
+   *   readString(wrapperStr, 0x8, 0x10, 0x18):
+   *     readLong(wrapperStr + 0x8)      → A
+   *     readLong(A + 0x10)              → B
+   *     readLong(B + 0x18)              → rawStrObj  (vtable + charData)
+   *     readString(rawStrObj)           → "npc-streuner"
    * </pre>
    */
   private void buildAssetIdChain(long entityAddr, String assetId) {
-    // Write the shared trait vector at entity +0x30
-    writeLong(entityAddr + Offsets.ENTITY_TRAITS, sharedTraitVectorAddress);
+    // Per-entity trait vector
+    long traitVector = alloc(64);
+    writeLong(entityAddr + Offsets.ENTITY_TRAITS, traitVector);
 
-    // The first trait element in the vector (at table + TABLE_SKIP + 0)
-    long traitAtom = alloc(64) | Offsets.ATOM_OBJECT;
-    writeLong(sharedTraitVectorAddress + Offsets.VECTOR_SIZE, 1);
-    writeLong(entityListTableAddress, traitAtom); // reuse temp; trait vector has its own table
-    // Actually, write the trait vector's own table
-    long traitTable = alloc(32);
-    writeLong(sharedTraitVectorAddress + Offsets.VECTOR_TABLE, traitTable);
-    writeLong(sharedTraitVectorAddress + Offsets.VECTOR_SIZE, 1);
+    // Trait vector: size=1, table → traitTable
+    long traitTable = alloc(64);
+    writeLong(traitVector + Offsets.VECTOR_TABLE, traitTable);
+    writeLong(traitVector + Offsets.VECTOR_SIZE, 1);
+
+    // The single trait element (atom-tagged)
+    long traitObj = alloc(128);
+    long traitAtom = traitObj | Offsets.ATOM_OBJECT;
     writeLong(traitTable + Offsets.VECTOR_TABLE_SKIP, traitAtom);
 
-    long trait = traitAtom & Offsets.ATOM_MASK;
-
-    // trait +0x40 -> intermediate1
+    // trait +0x40 → intermediate1
     long inter1 = alloc(64);
-    writeLong(trait + 0x40, inter1);
+    writeLong(traitObj + 0x40, inter1);
 
-    // inter1 +0x20 -> intermediate2
+    // inter1 +0x20 → intermediate2
     long inter2 = alloc(64);
     writeLong(inter1 + 0x20, inter2);
 
-    // inter2 +0x18 -> stringObject (the asset ID string)
-    long strObj = allocateStringObject(assetId);
-    writeLong(inter2 + 0x18, strObj);
+    // inter2 +0x18 → wrapper string (the chain entry point)
+    long wrapperStr = allocateStringObject(assetId);
+    writeLong(inter2 + 0x18, wrapperStr);
   }
 
   /**
-   * Allocate an AVM2-compatible StringObject in memory.
-   * Layout: +0x00=vtable, +0x10=charDataPtr, +0x20=sizeAndFlags.
+   * Allocate a wrapper string object that {@code getTraitAssetId} can resolve.
+   *
+   * <p>The chain from {@code readString(wrapper, 0x8, 0x10, 0x18)} expects:
+   * <pre>
+   *   wrapper +0x08 → A
+   *   A +0x10       → B
+   *   B +0x18       → rawStrObj (vtable, charData, sizeAndFlags)
+   * </pre>
+   *
+   * <p>{@code readString(rawStrObj)} goes through {@code SimExtraMemory}
+   * which checks vtable == STRING_OBJECT_VTABLE and looks up stringStore.
+   *
+   * @return the wrapper string object address (write to inter2 +0x18)
    */
   private long allocateStringObject(String s) {
-    byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-    long strObj = alloc(64);
+    long rawStr = allocateRawString(s);
+
+    // Build the 3-level indirection chain
+    long b = alloc(64);
+    writeLong(b + 0x18, rawStr);
+
+    long a = alloc(64);
+    writeLong(a + 0x10, b);
+
+    long wrapper = alloc(64);
+    writeLong(wrapper + 0x08, a);
+
+    return wrapper;
+  }
+
+  /**
+   * Allocate a raw AVM2 string object readable by {@code SimExtraMemory.readString}.
+   *
+   * <pre>
+   *   +0x00 = vtable (must match STRING_OBJECT_VTABLE)
+   *   +0x08 = composite/refcount (> 0 for isScriptableObjectValid)
+   *   +0x10 = charData pointer
+   *   +0x20 = sizeAndFlags (lower32 = byte length, upper32 = 0 for ISO-8859-1)
+   * </pre>
+   *
+   * @return the raw string object address
+   */
+  private long allocateRawString(String s) {
+    byte[] bytes = s.getBytes(StandardCharsets.ISO_8859_1);
+    long rawStr = alloc(64);
     long charData = alloc(bytes.length + 8);
     writeBytes(charData, bytes);
 
-    writeLong(strObj, vtableString); // vtable must match STRING_OBJECT_VTABLE
-    writeLong(strObj + Offsets.STRING_DATA_PTR, charData);
-    // sizeAndFlags: lower32 = length, upper32 = 0 (8-bit static)
-    writeLong(strObj + Offsets.STRING_SIZE_FLAGS, (long) bytes.length);
+    writeLong(rawStr, vtableString);                                    // +0x00 vtable
+    writeInt(rawStr + 8, 1);                                           // +0x08 composite > 0
+    writeLong(rawStr + Offsets.STRING_DATA_PTR, charData);              // +0x10 char data
+    writeLong(rawStr + Offsets.STRING_SIZE_FLAGS, (long) bytes.length); // +0x20 sizeAndFlags
 
-    stringStore.put(strObj, s);
-    return strObj;
+    stringStore.put(rawStr, s);
+    return rawStr;
   }
 
   /** Write a bindable int: the real value lives at {@code ptr + BINDABLE_VALUE}. */
@@ -386,7 +629,7 @@ public final class FakeMemory {
   // ----- String store -------------------------------------------------------
 
   /**
-   * Look up a string previously written via {@link #allocateStringObject}.
+   * Look up a string previously written via {@link #allocateRawString}.
    * Returns {@code null} if the address is unknown.
    */
   public String readStringByAddress(long address) {
@@ -559,5 +802,10 @@ public final class FakeMemory {
   /** Returns the entity list (Flash Vector) root address. */
   public long entityListAddress() {
     return entityListAddress;
+  }
+
+  /** Returns the hero ship entity address. */
+  public long heroShipAddress() {
+    return heroShipAddress;
   }
 }
