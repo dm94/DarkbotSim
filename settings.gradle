@@ -1,0 +1,6 @@
+rootProject.name = 'darkbot-sim'
+
+// DarkBot core classes and the darkbot-impl API jar are referenced via
+// files('../DarkBot/bin/main') and a flatDir 'libs' folder in build.gradle.
+// No composite build is needed: the simulator compiles standalone against
+// pre-built DarkBot artifacts.

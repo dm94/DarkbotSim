@@ -1,0 +1,41 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'eu.darkbot'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+// DarkBot commit the simulator's Offsets are pinned to.
+// Update both together when bumping.
+def DARKBOT_VERSION = 'be4d4eaba7' // darkbot 1.131.7
+
+dependencies {
+    // Compile against DarkBot core + eu.darkbot.api.* (provided by JitPack).
+    // At runtime DarkBot itself supplies these classes; the simulator only plugs in.
+    compileOnly "com.github.darkbot-reloaded:DarkBot:${DARKBOT_VERSION}"
+    compileOnly "com.github.darkbot-reloaded:DarkBotAPI:master-SNAPSHOT"
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+
+    testImplementation "com.github.darkbot-reloaded:DarkBot:${DARKBOT_VERSION}"
+    testImplementation "com.github.darkbot-reloaded:DarkBotAPI:master-SNAPSHOT"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
