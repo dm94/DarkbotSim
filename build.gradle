@@ -20,16 +20,19 @@ repositories {
 def DARKBOT_VERSION = 'be4d4eaba7' // darkbot 1.131.7
 
 dependencies {
-    // Compile against DarkBot core + eu.darkbot.api.* (provided by JitPack).
-    // At runtime DarkBot itself supplies these classes; the simulator only plugs in.
-    compileOnly "com.github.darkbot-reloaded:DarkBot:${DARKBOT_VERSION}"
-    compileOnly "com.github.darkbot-reloaded:DarkBotAPI:master-SNAPSHOT"
-    compileOnly 'org.jetbrains:annotations:24.1.0'
+  // Compile against DarkBot core + eu.darkbot.api.* (provided by JitPack).
+  // At runtime DarkBot itself supplies these classes; the simulator only plugs in.
+  compileOnly "com.github.darkbot-reloaded:DarkBot:${DARKBOT_VERSION}"
+  compileOnly "com.github.darkbot-reloaded:DarkBotAPI:master-SNAPSHOT"
+  // Gson ships with DarkBot at runtime; we use it for JSON scenarios.
+  compileOnly 'com.google.code.gson:gson:2.8.9'
+  compileOnly 'org.jetbrains:annotations:24.1.0'
 
-    testImplementation "com.github.darkbot-reloaded:DarkBot:${DARKBOT_VERSION}"
-    testImplementation "com.github.darkbot-reloaded:DarkBotAPI:master-SNAPSHOT"
-    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+  testImplementation "com.github.darkbot-reloaded:DarkBot:${DARKBOT_VERSION}"
+  testImplementation "com.github.darkbot-reloaded:DarkBotAPI:master-SNAPSHOT"
+  testImplementation 'com.google.code.gson:gson:2.8.9'
+  testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 test {

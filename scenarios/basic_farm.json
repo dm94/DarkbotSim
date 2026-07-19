@@ -1,0 +1,14 @@
+{
+  "map": { "id": 1, "width": 21000, "height": 13500 },
+  "hero": { "x": 1000, "y": 2000, "speed": 400, "hp": 100000, "shield": 10000 },
+  "npcs": [
+    { "preset": "streuner",       "x": 1500,  "y": 2000 },
+    { "preset": "lordakia",       "x": 2200,  "y": 1800 },
+    { "preset": "saimon",         "x": 3000,  "y": 2500 },
+    { "preset": "boss_saimon",    "x": 5000,  "y": 4000 }
+  ],
+  "boxes": [
+    { "type": "prometium", "x": 1200, "y": 2050, "cargoValue": 50 },
+    { "type": "endurium",  "x": 1400, "y": 2100, "cargoValue": 50 }
+  ]
+}
