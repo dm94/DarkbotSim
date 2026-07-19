@@ -14,18 +14,18 @@ public final class SimulatorAdapter extends GameAPIImpl<
     private final SimWorld world;
     private final FakeMemory memory;
 
-    public static SimulatorAdapter create(StartupParams params, SimWorld world) {
-        FakeMemory mem = new FakeMemory(world);
-        SimMemory sm = new SimMemory(mem);
-        SimExtraMemory se = new SimExtraMemory(mem);
-        return new SimulatorAdapter(params, world, mem, sm, se);
+    public SimulatorAdapter(StartupParams params) {
+        this(params, new SimWorld());
     }
 
-    private SimulatorAdapter(StartupParams params, SimWorld world,
-                             FakeMemory mem, SimMemory sm, SimExtraMemory se) {
+    public SimulatorAdapter(StartupParams params, SimWorld world) {
+        this(params, world, new FakeMemory(world));
+    }
+
+    private SimulatorAdapter(StartupParams params, SimWorld world, FakeMemory mem) {
         super(params,
               new SimWindow(), new SimHandler(),
-              sm, se, new SimInteraction(),
+              new SimMemory(mem), new SimExtraMemory(mem), new SimInteraction(),
               new SimulatorDirectInteraction(world),
               Capability.BACKGROUND_ONLY,
               Capability.DIRECT_MOVE_SHIP,
