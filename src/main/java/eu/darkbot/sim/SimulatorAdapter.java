@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
+import com.github.manolo8.darkbot.Main;
 import com.github.manolo8.darkbot.core.api.Capability;
 import com.github.manolo8.darkbot.core.api.GameAPIImpl;
 import com.github.manolo8.darkbot.utils.StartupParams;
@@ -55,10 +56,31 @@ public final class SimulatorAdapter extends
                 Capability.DIRECT_CALL_METHOD);
         this.world = world;
         this.memory = mem;
+        alignMapToBotConfig();
         loadDefaultScenario();
         System.out.println("[SIM] SimulatorAdapter ready: map=" + world.mapId
                 + " hero=(" + (int) world.hero.x + "," + (int) world.hero.y + ")"
                 + " npcs=" + world.npcs.size() + " boxes=" + world.boxes.size());
+    }
+
+    /**
+     * If DarkBot's config declares a WORKING_MAP, force the simulated world
+     * to that map id so the bot doesn't get stuck looking for a portal.
+     */
+    private void alignMapToBotConfig() {
+        try {
+            Main main = Main.INSTANCE;
+            if (main == null || main.config == null)
+                return;
+            int workingMap = main.config.GENERAL.WORKING_MAP;
+            if (workingMap > 0) {
+                world.mapId = workingMap;
+                System.out.println("[SIM] mapId aligned to bot WORKING_MAP=" + workingMap);
+            }
+        } catch (Throwable t) {
+            // Don't let config access break simulator startup.
+            System.err.println("[SIM] could not read WORKING_MAP: " + t.getMessage());
+        }
     }
 
     private void loadDefaultScenario() {
