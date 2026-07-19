@@ -3,6 +3,7 @@ package eu.darkbot.sim;
 import com.github.manolo8.darkbot.core.api.Capability;
 import com.github.manolo8.darkbot.core.api.GameAPIImpl;
 import com.github.manolo8.darkbot.utils.StartupParams;
+import eu.darkbot.api.utils.Inject;
 
 public final class SimulatorAdapter extends GameAPIImpl<
         SimWindow, SimHandler, SimMemory,
@@ -14,6 +15,7 @@ public final class SimulatorAdapter extends GameAPIImpl<
     private final SimWorld world;
     private final FakeMemory memory;
 
+    @Inject
     public SimulatorAdapter(StartupParams params) {
         this(params, new SimWorld());
     }
