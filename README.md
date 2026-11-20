@@ -118,7 +118,7 @@ tests together.
 
 ## License
 
-[MIT](LICENSE) (c) 2026 Daniel Martín.
+[MIT](LICENSE) (c) 2026
 
 ## Acknowledgements
 
