@@ -1,8 +1,9 @@
 # Gradle
-gradle/
 .gradle/
 build/
 !gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+!gradle/
 
 # IDE
 .idea/
@@ -16,3 +17,11 @@ build/
 # OS
 Thumbs.db
 .DS_Store
+
+# Build output / compiled classes
+bin/
+out/
+*.class
+
+# Local scenario overrides (keep the bundled one)
+# scenarios/*.local.json
